@@ -3,14 +3,14 @@ from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database.connection import engine
+
 from app.routes.events import router as events_router
 from app.routes.occupancy import router as occupancy_router
 from app.routes.analytics import router as analytics_router
 from app.routes.vehicles import router as vehicles_router
 from app.routes.snapshots import router as snapshots_router
+
 from app.realtime import parking_websocket
-
-
 
 
 # =========================================================
@@ -54,6 +54,10 @@ app.include_router(snapshots_router)
 
 @app.websocket("/ws/parking")
 async def parking_live_updates(websocket: WebSocket):
+    # Accept the WebSocket connection explicitly here.
+    await websocket.accept()
+
+    # Register the connection and keep it alive.
     await parking_websocket(websocket)
 
 
