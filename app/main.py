@@ -54,10 +54,21 @@ app.include_router(snapshots_router)
 
 @app.websocket("/ws/parking")
 async def parking_live_updates(websocket: WebSocket):
-    # Accept the WebSocket connection explicitly here.
+    """
+    WebSocket endpoint for real-time parking updates.
+
+    The connection is accepted here and then handed over
+    to parking_websocket(), which handles:
+
+    - authentication
+    - connection registration
+    - heartbeat
+    - client messages
+    - disconnect cleanup
+    """
+
     await websocket.accept()
 
-    # Register the connection and keep it alive.
     await parking_websocket(websocket)
 
 

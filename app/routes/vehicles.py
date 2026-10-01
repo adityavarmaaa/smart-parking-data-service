@@ -16,21 +16,46 @@ def get_vehicle(
     plate_number: str,
     db: Session = Depends(get_db),
 ):
+    """
+    Get complete vehicle information.
+
+    Normalized relationships:
+
+        vehicles
+            ├── vehicle_type_fk -> vehicle_types
+            ├── color_fk        -> vehicle_colors
+            │
+            └── vehicle.id
+                    ├── parking_events.vehicle_fk
+                    ├── parking_sessions.vehicle_fk
+                    └── parking_slot_state.vehicle_fk
+
+    Legacy vehicle_type/color columns are NOT used.
+    Legacy parking_area_id on cameras is NOT used.
+    """
+
     # =========================================================
-    # 1. GET VEHICLE
+    # 1. GET CANONICAL VEHICLE
     # =========================================================
 
     vehicle = db.execute(
         text("""
             SELECT
-                id,
-                plate_number,
-                vehicle_type,
-                color,
-                first_seen_at,
-                last_seen_at
-            FROM vehicles
-            WHERE plate_number = :plate
+                v.id,
+                v.plate_number,
+                vt.code AS vehicle_type,
+                vc.code AS color,
+                v.first_seen_at,
+                v.last_seen_at
+            FROM vehicles v
+
+            LEFT JOIN vehicle_types vt
+                ON vt.id = v.vehicle_type_fk
+
+            LEFT JOIN vehicle_colors vc
+                ON vc.id = v.color_fk
+
+            WHERE v.plate_number = :plate
             LIMIT 1
         """),
         {
@@ -47,25 +72,52 @@ def get_vehicle(
     # =========================================================
     # 2. GET CURRENT PARKING STATE
     # =========================================================
+    #
+    # Area is resolved through:
+    #
+    # parking_slot_state
+    #       ↓
+    # cameras
+    #       ↓
+    # parking_area_fk
+    #       ↓
+    # parking_areas
+    #
+    # We intentionally do NOT use:
+    #
+    # cameras.parking_area_id
+    #
+    # =========================================================
 
     current_slot = db.execute(
         text("""
             SELECT
-                camera_id,
-                parking_area_id,
-                slot_id,
-                status,
-                track_id,
-                occupied_since,
-                updated_at
-            FROM parking_slot_state
-            WHERE plate_number = :plate
-              AND status = 'occupied'
-            ORDER BY updated_at DESC
+                pss.camera_id,
+
+                pa.area_code AS parking_area_id,
+
+                pss.slot_id,
+                pss.status,
+                pss.track_id,
+                pss.occupied_since,
+                pss.updated_at
+
+            FROM parking_slot_state pss
+
+            JOIN cameras c
+                ON c.camera_id = pss.camera_id
+
+            JOIN parking_areas pa
+                ON pa.id = c.parking_area_fk
+
+            WHERE pss.vehicle_fk = :vehicle_id
+              AND pss.status = 'occupied'
+
+            ORDER BY pss.updated_at DESC
             LIMIT 1
         """),
         {
-            "plate": plate_number,
+            "vehicle_id": vehicle["id"],
         },
     ).mappings().first()
 
@@ -76,21 +128,23 @@ def get_vehicle(
     sessions = db.execute(
         text("""
             SELECT
-                id,
-                camera_id,
-                slot_id,
-                entry_time,
-                exit_time,
-                duration_seconds,
-                status,
-                entry_screenshot_url,
-                exit_screenshot_url
-            FROM parking_sessions
-            WHERE plate_number = :plate
-            ORDER BY entry_time DESC
+                ps.id,
+                ps.camera_id,
+                ps.slot_id,
+                ps.entry_time,
+                ps.exit_time,
+                ps.duration_seconds,
+                ps.status,
+                ps.entry_screenshot_url,
+                ps.exit_screenshot_url
+            FROM parking_sessions ps
+
+            WHERE ps.vehicle_fk = :vehicle_id
+
+            ORDER BY ps.entry_time DESC
         """),
         {
-            "plate": plate_number,
+            "vehicle_id": vehicle["id"],
         },
     ).mappings().all()
 
