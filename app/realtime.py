@@ -9,7 +9,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 # CONFIGURATION
 # =========================================================
 
-WS_TOKEN = os.getenv("WS_TOKEN")
+WS_TOKEN = os.getenv("WS_TOKEN", "").strip()
 
 HEARTBEAT_INTERVAL = 30
 MAX_CONNECTIONS = 100
@@ -140,19 +140,29 @@ async def parking_websocket(websocket: WebSocket):
 
         return
 
-    token = websocket.query_params.get("token")
+    token = websocket.query_params.get("token", "")
+
+    # Normalize both sides
+    received_token = token.strip()
+    configured_token = WS_TOKEN.strip()
 
     print(
-        f"[WS] Token received: {'YES' if token else 'NO'}",
+        f"[WS] Token received: {'YES' if received_token else 'NO'}",
         flush=True,
     )
 
     print(
-        f"[WS] Configured token length: {len(WS_TOKEN)}",
+        f"[WS] Token lengths: "
+        f"received={len(received_token)}, "
+        f"configured={len(configured_token)}",
         flush=True,
     )
 
-    if token != WS_TOKEN:
+    # -----------------------------------------------------
+    # TOKEN AUTHENTICATION
+    # -----------------------------------------------------
+
+    if received_token != configured_token:
 
         print(
             "[WS] ERROR: Token authentication FAILED",
