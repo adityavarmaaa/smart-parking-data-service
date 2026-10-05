@@ -54,7 +54,14 @@ class ParkingConnections:
             try:
                 await client.send_json(message)
 
-            except Exception:
+            except Exception as error:
+
+                print(
+                    f"[WS BROADCAST ERROR] "
+                    f"{type(error).__name__}: {error}",
+                    flush=True,
+                )
+
                 dead_clients.append(client)
 
         for client in dead_clients:
@@ -85,7 +92,19 @@ async def heartbeat_loop(websocket: WebSocket):
                     }
                 )
 
-            except Exception:
+                print(
+                    "[WS] Heartbeat PING sent",
+                    flush=True,
+                )
+
+            except Exception as error:
+
+                print(
+                    f"[WS HEARTBEAT ERROR] "
+                    f"{type(error).__name__}: {error}",
+                    flush=True,
+                )
+
                 break
 
     except asyncio.CancelledError:
@@ -98,29 +117,59 @@ async def heartbeat_loop(websocket: WebSocket):
 
 async def parking_websocket(websocket: WebSocket):
 
+    print(
+        "[WS] Handler entered",
+        flush=True,
+    )
+
     # -----------------------------------------------------
     # SECURITY CHECK
     # -----------------------------------------------------
 
     if not WS_TOKEN:
 
+        print(
+            "[WS] ERROR: WS_TOKEN is missing",
+            flush=True,
+        )
+
         await websocket.close(
             code=1011,
-            reason="WebSocket authentication is not configured"
+            reason="WebSocket authentication is not configured",
         )
 
         return
 
     token = websocket.query_params.get("token")
 
+    print(
+        f"[WS] Token received: {'YES' if token else 'NO'}",
+        flush=True,
+    )
+
+    print(
+        f"[WS] Configured token length: {len(WS_TOKEN)}",
+        flush=True,
+    )
+
     if token != WS_TOKEN:
+
+        print(
+            "[WS] ERROR: Token authentication FAILED",
+            flush=True,
+        )
 
         await websocket.close(
             code=1008,
-            reason="Unauthorized"
+            reason="Unauthorized",
         )
 
         return
+
+    print(
+        "[WS] Token authentication SUCCESS",
+        flush=True,
+    )
 
     # -----------------------------------------------------
     # CONNECTION LIMIT
@@ -128,11 +177,21 @@ async def parking_websocket(websocket: WebSocket):
 
     added = await parking_connections.add(websocket)
 
+    print(
+        f"[WS] Client registration result: {added}",
+        flush=True,
+    )
+
     if not added:
+
+        print(
+            "[WS] ERROR: Maximum connection limit reached",
+            flush=True,
+        )
 
         await websocket.close(
             code=1013,
-            reason="Server connection limit reached"
+            reason="Server connection limit reached",
         )
 
         return
@@ -151,22 +210,42 @@ async def parking_websocket(websocket: WebSocket):
         # CONNECTED MESSAGE
         # -------------------------------------------------
 
+        print(
+            "[WS] Sending CONNECTED message...",
+            flush=True,
+        )
+
         await websocket.send_json(
             {
                 "type": "CONNECTED",
-                "message": "Parking live updates connected"
+                "message": "Parking live updates connected",
             }
+        )
+
+        print(
+            "[WS] CONNECTED message SENT successfully",
+            flush=True,
         )
 
         # -------------------------------------------------
         # KEEP CONNECTION ALIVE
         # -------------------------------------------------
 
+        print(
+            "[WS] Waiting for messages...",
+            flush=True,
+        )
+
         while True:
 
             try:
 
                 message = await websocket.receive_text()
+
+                print(
+                    f"[WS] Received message: {message!r}",
+                    flush=True,
+                )
 
                 if message == "PING":
 
@@ -176,26 +255,47 @@ async def parking_websocket(websocket: WebSocket):
                         }
                     )
 
-            except WebSocketDisconnect:
+                    print(
+                        "[WS] PONG sent",
+                        flush=True,
+                    )
+
+            except WebSocketDisconnect as error:
+
+                print(
+                    f"[WS] Client disconnected. "
+                    f"code={error.code}",
+                    flush=True,
+                )
 
                 break
 
-    except Exception:
-        pass
+    except Exception as error:
+
+        print(
+            f"[WS ERROR] {type(error).__name__}: {error}",
+            flush=True,
+        )
+
+        import traceback
+
+        traceback.print_exc()
 
     finally:
 
-        # -------------------------------------------------
-        # STOP HEARTBEAT
-        # -------------------------------------------------
+        print(
+            "[WS] Cleaning up connection",
+            flush=True,
+        )
 
         heartbeat_task.cancel()
 
         with suppress(asyncio.CancelledError):
             await heartbeat_task
 
-        # -------------------------------------------------
-        # REMOVE CONNECTION
-        # -------------------------------------------------
-
         await parking_connections.remove(websocket)
+
+        print(
+            "[WS] Connection cleanup complete",
+            flush=True,
+        )
