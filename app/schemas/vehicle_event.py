@@ -1,6 +1,5 @@
 from datetime import datetime
 from typing import Optional
-
 from pydantic import BaseModel
 
 
@@ -28,7 +27,8 @@ class VehicleEvent(BaseModel):
     camera_id: str
     parking_area_id: str
     track_id: Optional[int] = None
-    timestamp: datetime
+    timestamp: datetime`r`n    captured_at: Optional[datetime] = None
+    captured_at: Optional[datetime] = None
 
     vehicle: VehicleData
     parking: Optional[ParkingData] = None
