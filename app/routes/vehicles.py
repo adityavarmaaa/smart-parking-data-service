@@ -72,7 +72,7 @@ def get_vehicle(
     if not vehicle:
         raise HTTPException(
             status_code=404,
-            detail=f"Vehicle {plate_number} not found",
+            detail="Vehicle not found",
         )
 
     # =========================================================
