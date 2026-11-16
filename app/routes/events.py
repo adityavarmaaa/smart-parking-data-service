@@ -387,7 +387,7 @@ async def receive_vehicle_event(
                         RETURNING id
                     """),
                     {
-                        "plate": plate,
+                        "plate": None,
                         "ciphertext": plate_ciphertext,
                         "plate_hmac": plate_fingerprint,
                         "vehicle_type_fk": vehicle_type_fk,
@@ -499,7 +499,7 @@ async def receive_vehicle_event(
                         event.vehicle.color_confidence
                     ),
 
-                    "plate_number": plate,
+                    "plate_number": None,
                     "plate_ciphertext": plate_ciphertext,
                     "plate_hmac": plate_fingerprint,
                     "plate_confidence": (
@@ -530,7 +530,7 @@ async def receive_vehicle_event(
 
                     "observed_vehicle_type": event.vehicle.type,
                     "observed_color": event.vehicle.color,
-                    "observed_plate_number": plate,
+                    "observed_plate_number": None,
                     "observed_plate_ciphertext": (
                         observed_plate_ciphertext
                     ),
@@ -647,7 +647,7 @@ async def receive_vehicle_event(
                     RETURNING id
                 """),
                 {
-                    "plate": plate,
+                    "plate": None,
                     "ciphertext": plate_ciphertext,
                     "plate_hmac": plate_fingerprint,
                     "vehicle_type": event.vehicle.type,
@@ -683,7 +683,7 @@ async def receive_vehicle_event(
                 """),
                 {
                     "vehicle_id": vehicle_id,
-                    "plate": plate,
+                    "plate": None,
                     "ciphertext": plate_ciphertext,
                     "plate_hmac": plate_fingerprint,
                     "track_id": event.track_id,
