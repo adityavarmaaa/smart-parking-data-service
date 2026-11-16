@@ -1,5 +1,6 @@
 import asyncio
 import os
+import hmac
 from contextlib import suppress
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -151,18 +152,16 @@ async def parking_websocket(websocket: WebSocket):
         flush=True,
     )
 
-    print(
-        f"[WS] Token lengths: "
-        f"received={len(received_token)}, "
-        f"configured={len(configured_token)}",
-        flush=True,
-    )
+   
 
     # -----------------------------------------------------
     # TOKEN AUTHENTICATION
     # -----------------------------------------------------
 
-    if received_token != configured_token:
+    if not hmac.compare_digest(
+    received_token,
+    configured_token,
+):
 
         print(
             "[WS] ERROR: Token authentication FAILED",
