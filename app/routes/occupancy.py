@@ -44,7 +44,7 @@ def get_occupancy(
 
                 pss.status,
 
-                v.plate_number AS plate_number,
+                
 
                 pss.vehicle_fk,
                 pss.track_id,
@@ -95,7 +95,7 @@ def get_occupancy(
                 "slot_id": slot["slot_id"],
                 "parking_area_id": slot["parking_area_id"],
                 "status": slot["status"],
-                "plate_number": slot["plate_number"],
+                
                 "track_id": slot["track_id"],
                 "occupied_since": slot["occupied_since"],
                 "updated_at": slot["updated_at"],
