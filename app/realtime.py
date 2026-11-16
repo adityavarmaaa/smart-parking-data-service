@@ -253,7 +253,7 @@ async def parking_websocket(websocket: WebSocket):
                 message = await websocket.receive_text()
 
                 print(
-                    f"[WS] Received message: {message!r}",
+                    "[WS] Client message received",
                     flush=True,
                 )
 
