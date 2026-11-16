@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -21,65 +22,37 @@ async def receive_vehicle_event(
     db: Session = Depends(get_db),
 ):
     """
-    Receive a vehicle event from Service 1.
+    Receive and persist vehicle events.
 
-    Normalized relationships:
+    Plate protection:
+        - AES-GCM ciphertext stored in encrypted columns.
+        - HMAC fingerprint stored for matching.
+        - Legacy plaintext columns retained temporarily
+          for compatibility with existing constraints.
 
-        event_types
-            ↓
-        parking_events.event_type_fk
-
-        parking_areas
-            ↓
-        cameras.parking_area_fk
-
-        vehicle_types
-            ↓
-        vehicles.vehicle_type_fk
-
-        vehicle_colors
-            ↓
-        vehicles.color_fk
-
-        vehicles
-            ↓
-        parking_events.vehicle_fk
-
-        vehicles
-            ↓
-        parking_sessions.vehicle_fk
-
-        vehicles
-            ↓
-        parking_slot_state.vehicle_fk
-
-    Service 1 payload is NOT changed.
-
-    captured_at:
-        Actual camera/NVR capture time when provided.
-        Falls back to timestamp when captured_at is absent.
-
-    Idempotency:
-        The same event is processed only once.
-
-        We DO NOT deduplicate by plate alone because
-        the same vehicle can legitimately have:
-
-            ENTRY -> EXIT -> ENTRY -> EXIT
-
-        The database unique index provides final protection
-        against concurrent duplicate requests.
+    Snapshot paths are not plate values and remain unchanged.
     """
 
     try:
 
         # =====================================================
-        # 0. RESOLVE AUTHORITATIVE EVENT TIME
+        # 0. EVENT TIME AND PLATE SECURITY VALUES
         # =====================================================
 
-        # captured_at = actual camera/NVR capture time.
-        # timestamp   = backward-compatible fallback.
         event_time = event.captured_at or event.timestamp
+
+        plate = event.vehicle.plate
+
+        plate_ciphertext = (
+            encrypt_text(plate) if plate else None
+        )
+
+        plate_fingerprint = (
+            plate_hmac(plate) if plate else None
+        )
+
+        observed_plate_ciphertext = plate_ciphertext
+        observed_plate_fingerprint = plate_fingerprint
 
         # =====================================================
         # 1. RESOLVE EVENT TYPE
@@ -92,9 +65,7 @@ async def receive_vehicle_event(
                 WHERE code = :event_type
                 LIMIT 1
             """),
-            {
-                "event_type": event.event_type,
-            },
+            {"event_type": event.event_type},
         ).first()
 
         if not event_type_result:
@@ -116,9 +87,7 @@ async def receive_vehicle_event(
                 WHERE area_code = :area_code
                 LIMIT 1
             """),
-            {
-                "area_code": event.parking_area_id,
-            },
+            {"area_code": event.parking_area_id},
         ).first()
 
         if not area_result:
@@ -144,18 +113,13 @@ async def receive_vehicle_event(
                     WHERE code = :code
                     LIMIT 1
                 """),
-                {
-                    "code": event.vehicle.type,
-                },
+                {"code": event.vehicle.type},
             ).first()
 
             if not type_result:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Unknown vehicle type: "
-                        f"{event.vehicle.type}"
-                    ),
+                    detail=f"Unknown vehicle type: {event.vehicle.type}",
                 )
 
             vehicle_type_fk = type_result[0]
@@ -175,18 +139,13 @@ async def receive_vehicle_event(
                     WHERE code = :code
                     LIMIT 1
                 """),
-                {
-                    "code": event.vehicle.color,
-                },
+                {"code": event.vehicle.color},
             ).first()
 
             if not color_result:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Unknown vehicle color: "
-                        f"{event.vehicle.color}"
-                    ),
+                    detail=f"Unknown vehicle color: {event.vehicle.color}",
                 )
 
             color_fk = color_result[0]
@@ -202,36 +161,7 @@ async def receive_vehicle_event(
         )
 
         # =====================================================
-        # 5.5. IDEMPOTENCY CHECK
-        # =====================================================
-        #
-        # IMPORTANT:
-        #
-        # We do NOT deduplicate by plate alone.
-        #
-        # A legitimate vehicle lifecycle can be:
-        #
-        # ENTRY 10:00
-        # EXIT 11:00
-        # ENTRY 14:00
-        # EXIT 15:00
-        #
-        # These are four different events.
-        #
-        # The same exact event, however, can be resent by
-        # Service 1 because of network retries.
-        #
-        # The fields below match the database unique index:
-        #
-        # event_type
-        # camera_id
-        # track_id
-        # slot_id
-        # timestamp
-        # plate_number
-        #
-        # IS NOT DISTINCT FROM allows NULL values to compare
-        # safely as equal.
+        # 6. IDEMPOTENCY CHECK
         # =====================================================
 
         existing_event = db.execute(
@@ -243,7 +173,16 @@ async def receive_vehicle_event(
                   AND track_id IS NOT DISTINCT FROM :track_id
                   AND slot_id IS NOT DISTINCT FROM :slot_id
                   AND timestamp = :timestamp
-                  AND plate_number IS NOT DISTINCT FROM :plate_number
+                  AND (
+                      (
+                          :plate_hmac IS NOT NULL
+                          AND plate_number_hmac = :plate_hmac
+                      )
+                      OR (
+                          plate_number_hmac IS NULL
+                          AND plate_number IS NOT DISTINCT FROM :plate
+                      )
+                  )
                 LIMIT 1
             """),
             {
@@ -252,22 +191,12 @@ async def receive_vehicle_event(
                 "track_id": event.track_id,
                 "slot_id": slot_id,
                 "timestamp": event.timestamp,
-                "plate_number": event.vehicle.plate,
+                "plate_hmac": plate_fingerprint,
+                "plate": plate,
             },
         ).scalar()
 
         if existing_event is not None:
-
-            print(
-                f"[IDEMPOTENCY] Duplicate event ignored: "
-                f"event_id={existing_event}, "
-                f"type={event.event_type}, "
-                f"camera={event.camera_id}, "
-                f"track={event.track_id}, "
-                f"slot={slot_id}, "
-                f"plate={event.vehicle.plate}",
-                flush=True,
-            )
 
             return {
                 "status": "duplicate",
@@ -277,17 +206,11 @@ async def receive_vehicle_event(
                 "camera_id": event.camera_id,
                 "parking_area_id": event.parking_area_id,
                 "slot_id": slot_id,
-                "plate": event.vehicle.plate,
             }
 
         # =====================================================
-        # 6. ENSURE CAMERA EXISTS
+        # 7. ENSURE CAMERA EXISTS
         # =====================================================
-
-        # cameras.parking_area_id is currently retained as
-        # a compatibility column.
-        #
-        # parking_area_fk is the normalized relationship.
 
         db.execute(
             text("""
@@ -318,7 +241,7 @@ async def receive_vehicle_event(
         )
 
         # =====================================================
-        # 7. ENSURE PARKING SLOT
+        # 8. ENSURE PARKING SLOT AND SLOT STATE
         # =====================================================
 
         if slot_id:
@@ -346,10 +269,6 @@ async def receive_vehicle_event(
                 },
             )
 
-            # =================================================
-            # 8. ENSURE SLOT STATE
-            # =================================================
-
             db.execute(
                 text("""
                     INSERT INTO parking_slot_state (
@@ -358,6 +277,8 @@ async def receive_vehicle_event(
                         parking_area_id,
                         status,
                         plate_number,
+                        plate_number_ciphertext,
+                        plate_number_hmac,
                         vehicle_fk
                     )
                     VALUES (
@@ -365,6 +286,8 @@ async def receive_vehicle_event(
                         :slot_id,
                         :parking_area_id,
                         'available',
+                        NULL,
+                        NULL,
                         NULL,
                         NULL
                     )
@@ -382,31 +305,26 @@ async def receive_vehicle_event(
         # 9. RESOLVE / CREATE VEHICLE
         # =====================================================
 
-        plate = event.vehicle.plate
-        plate_ciphertext = encrypt_text(plate) if plate else None
-        plate_fingerprint = plate_hmac(plate) if plate else None
         vehicle_id = None
 
         if plate:
 
             vehicle_result = db.execute(
                 text("""
-                    SELECT
-                        id,
-                        vehicle_type_fk,
-                        color_fk
+                    SELECT id
                     FROM vehicles
-                    WHERE plate_number_hmac = :plate_hmac  OR plate_number = :plate
+                    WHERE plate_number_hmac = :plate_hmac
+                       OR (
+                           plate_number_hmac IS NULL
+                           AND plate_number = :plate
+                       )
                     LIMIT 1
                 """),
                 {
-                   "plate_hmac": plate_fingerprint,
+                    "plate_hmac": plate_fingerprint,
+                    "plate": plate,
                 },
             ).mappings().first()
-
-            # -------------------------------------------------
-            # EXISTING VEHICLE
-            # -------------------------------------------------
 
             if vehicle_result:
 
@@ -416,31 +334,29 @@ async def receive_vehicle_event(
                     text("""
                         UPDATE vehicles
                         SET
-                            vehicle_type_fk =
-                                COALESCE(
-                                    :vehicle_type_fk,
-                                    vehicle_type_fk
-                                ),
-                            color_fk =
-                                COALESCE(
-                                    :color_fk,
-                                    color_fk
-                                ),
+                            plate_number_ciphertext = :ciphertext,
+                            plate_number_hmac = :plate_hmac,
+                            vehicle_type_fk = COALESCE(
+                                :vehicle_type_fk,
+                                vehicle_type_fk
+                            ),
+                            color_fk = COALESCE(
+                                :color_fk,
+                                color_fk
+                            ),
                             last_seen_at = :timestamp,
                             updated_at = NOW()
                         WHERE id = :vehicle_id
                     """),
                     {
                         "vehicle_id": vehicle_id,
+                        "ciphertext": plate_ciphertext,
+                        "plate_hmac": plate_fingerprint,
                         "vehicle_type_fk": vehicle_type_fk,
                         "color_fk": color_fk,
                         "timestamp": event_time,
                     },
                 )
-
-            # -------------------------------------------------
-            # NEW VEHICLE
-            # -------------------------------------------------
 
             else:
 
@@ -448,6 +364,8 @@ async def receive_vehicle_event(
                     text("""
                         INSERT INTO vehicles (
                             plate_number,
+                            plate_number_ciphertext,
+                            plate_number_hmac,
                             vehicle_type_fk,
                             color_fk,
                             first_seen_at,
@@ -457,6 +375,8 @@ async def receive_vehicle_event(
                         )
                         VALUES (
                             :plate,
+                            :ciphertext,
+                            :plate_hmac,
                             :vehicle_type_fk,
                             :color_fk,
                             :timestamp,
@@ -468,6 +388,8 @@ async def receive_vehicle_event(
                     """),
                     {
                         "plate": plate,
+                        "ciphertext": plate_ciphertext,
+                        "plate_hmac": plate_fingerprint,
                         "vehicle_type_fk": vehicle_type_fk,
                         "color_fk": color_fk,
                         "timestamp": event_time,
@@ -479,7 +401,7 @@ async def receive_vehicle_event(
                 vehicle_id = vehicle_insert.scalar_one()
 
         # =====================================================
-        # 10. SAVE EVENT
+        # 10. SAVE PARKING EVENT
         # =====================================================
 
         event_query = text("""
@@ -499,6 +421,8 @@ async def receive_vehicle_event(
                 color_confidence,
 
                 plate_number,
+                plate_number_ciphertext,
+                plate_number_hmac,
                 plate_confidence,
 
                 slot_id,
@@ -511,7 +435,9 @@ async def receive_vehicle_event(
 
                 observed_vehicle_type,
                 observed_color,
-                observed_plate_number
+                observed_plate_number,
+                observed_plate_number_ciphertext,
+                observed_plate_number_hmac
             )
             VALUES (
                 :event_type,
@@ -529,6 +455,8 @@ async def receive_vehicle_event(
                 :color_confidence,
 
                 :plate_number,
+                :plate_ciphertext,
+                :plate_hmac,
                 :plate_confidence,
 
                 :slot_id,
@@ -541,7 +469,9 @@ async def receive_vehicle_event(
 
                 :observed_vehicle_type,
                 :observed_color,
-                :observed_plate_number
+                :observed_plate_number,
+                :observed_plate_ciphertext,
+                :observed_plate_hmac
             )
             RETURNING id
         """)
@@ -551,21 +481,14 @@ async def receive_vehicle_event(
             result = db.execute(
                 event_query,
                 {
-                    # Compatibility
                     "event_type": event.event_type,
-                    "parking_area_id": event.parking_area_id,
-
-                    # Normalized
                     "event_type_fk": event_type_fk,
-                    "vehicle_fk": vehicle_id,
-
-                    # Camera / tracking
                     "camera_id": event.camera_id,
+                    "parking_area_id": event.parking_area_id,
                     "track_id": event.track_id,
                     "timestamp": event.timestamp,
                     "captured_at": event_time,
 
-                    # Vehicle observation
                     "vehicle_type": event.vehicle.type,
                     "vehicle_type_confidence": (
                         event.vehicle.type_confidence
@@ -576,12 +499,13 @@ async def receive_vehicle_event(
                         event.vehicle.color_confidence
                     ),
 
-                    "plate_number": event.vehicle.plate,
+                    "plate_number": plate,
+                    "plate_ciphertext": plate_ciphertext,
+                    "plate_hmac": plate_fingerprint,
                     "plate_confidence": (
                         event.vehicle.plate_confidence
                     ),
 
-                    # Parking
                     "slot_id": slot_id,
                     "slot_confidence": (
                         event.parking.slot_confidence
@@ -589,42 +513,36 @@ async def receive_vehicle_event(
                         else None
                     ),
 
-                    # Snapshots
                     "vehicle_snapshot": (
                         event.snapshot.vehicle
                         if event.snapshot
                         else None
                     ),
 
+                    # This is a snapshot path/URL, not a plate value.
                     "plate_snapshot": (
                         event.snapshot.plate
                         if event.snapshot
                         else None
                     ),
 
-                    # Audit
+                    "vehicle_fk": vehicle_id,
+
                     "observed_vehicle_type": event.vehicle.type,
                     "observed_color": event.vehicle.color,
-                    "observed_plate_number": event.vehicle.plate,
+                    "observed_plate_number": plate,
+                    "observed_plate_ciphertext": (
+                        observed_plate_ciphertext
+                    ),
+                    "observed_plate_hmac": (
+                        observed_plate_fingerprint
+                    ),
                 },
             )
 
             event_id = result.scalar_one()
 
         except IntegrityError:
-
-            # =================================================
-            # CONCURRENT DUPLICATE
-            # =================================================
-            #
-            # Two identical requests can arrive at almost
-            # exactly the same time.
-            #
-            # The application-level check above cannot fully
-            # protect against that race.
-            #
-            # PostgreSQL unique index is the final protection.
-            # =================================================
 
             db.rollback()
 
@@ -637,7 +555,16 @@ async def receive_vehicle_event(
                       AND track_id IS NOT DISTINCT FROM :track_id
                       AND slot_id IS NOT DISTINCT FROM :slot_id
                       AND timestamp = :timestamp
-                      AND plate_number IS NOT DISTINCT FROM :plate_number
+                      AND (
+                          (
+                              :plate_hmac IS NOT NULL
+                              AND plate_number_hmac = :plate_hmac
+                          )
+                          OR (
+                              plate_number_hmac IS NULL
+                              AND plate_number IS NOT DISTINCT FROM :plate
+                          )
+                      )
                     LIMIT 1
                 """),
                 {
@@ -646,17 +573,12 @@ async def receive_vehicle_event(
                     "track_id": event.track_id,
                     "slot_id": slot_id,
                     "timestamp": event.timestamp,
-                    "plate_number": event.vehicle.plate,
+                    "plate_hmac": plate_fingerprint,
+                    "plate": plate,
                 },
             ).scalar()
 
             if existing_event is not None:
-
-                print(
-                    f"[IDEMPOTENCY] Concurrent duplicate ignored: "
-                    f"event_id={existing_event}",
-                    flush=True,
-                )
 
                 return {
                     "status": "duplicate",
@@ -666,7 +588,6 @@ async def receive_vehicle_event(
                     "camera_id": event.camera_id,
                     "parking_area_id": event.parking_area_id,
                     "slot_id": slot_id,
-                    "plate": event.vehicle.plate,
                 }
 
             raise
@@ -678,48 +599,32 @@ async def receive_vehicle_event(
         if event.event_type == "ENTRY":
 
             if not plate:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
                     detail="ENTRY event requires vehicle plate",
                 )
 
             if not slot_id:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
                     detail="ENTRY event requires parking.slot_id",
                 )
 
             if vehicle_id is None:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "ENTRY event requires "
-                        "a resolvable vehicle"
-                    ),
+                    detail="ENTRY event requires a resolvable vehicle",
                 )
-
-            # -------------------------------------------------
-            # CREATE SESSION
-            # -------------------------------------------------
 
             session_result = db.execute(
                 text("""
                     INSERT INTO parking_sessions (
                         plate_number,
+                        plate_number_ciphertext,
+                        plate_number_hmac,
                         vehicle_type,
                         color,
-
                         vehicle_fk,
-
                         camera_id,
                         slot_id,
                         entry_time,
@@ -727,12 +632,12 @@ async def receive_vehicle_event(
                         entry_screenshot_url
                     )
                     VALUES (
-                        :plate_number,
+                        :plate,
+                        :ciphertext,
+                        :plate_hmac,
                         :vehicle_type,
                         :color,
-
                         :vehicle_fk,
-
                         :camera_id,
                         :slot_id,
                         :entry_time,
@@ -742,7 +647,9 @@ async def receive_vehicle_event(
                     RETURNING id
                 """),
                 {
-                    "plate_number": plate,
+                    "plate": plate,
+                    "ciphertext": plate_ciphertext,
+                    "plate_hmac": plate_fingerprint,
                     "vehicle_type": event.vehicle.type,
                     "color": event.vehicle.color,
                     "vehicle_fk": vehicle_id,
@@ -759,17 +666,15 @@ async def receive_vehicle_event(
 
             session_id = session_result.scalar_one()
 
-            # -------------------------------------------------
-            # OCCUPY SLOT
-            # -------------------------------------------------
-
             slot_update = db.execute(
                 text("""
                     UPDATE parking_slot_state
                     SET
                         status = 'occupied',
                         vehicle_fk = :vehicle_id,
-                        plate_number = :plate_number,
+                        plate_number = :plate,
+                        plate_number_ciphertext = :ciphertext,
+                        plate_number_hmac = :plate_hmac,
                         track_id = :track_id,
                         occupied_since = :timestamp,
                         updated_at = NOW()
@@ -778,7 +683,9 @@ async def receive_vehicle_event(
                 """),
                 {
                     "vehicle_id": vehicle_id,
-                    "plate_number": plate,
+                    "plate": plate,
+                    "ciphertext": plate_ciphertext,
+                    "plate_hmac": plate_fingerprint,
                     "track_id": event.track_id,
                     "timestamp": event_time,
                     "camera_id": event.camera_id,
@@ -787,27 +694,12 @@ async def receive_vehicle_event(
             )
 
             if slot_update.rowcount != 1:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Parking slot "
-                        f"{event.camera_id}/{slot_id} "
-                        f"could not be updated"
-                    ),
+                    detail="Parking slot could not be updated",
                 )
 
-            # -------------------------------------------------
-            # COMMIT
-            # -------------------------------------------------
-
             db.commit()
-
-            # -------------------------------------------------
-            # WEBSOCKET
-            # -------------------------------------------------
 
             await parking_connections.broadcast({
                 "type": "PARKING_UPDATED",
@@ -815,7 +707,6 @@ async def receive_vehicle_event(
                 "camera_id": event.camera_id,
                 "parking_area_id": event.parking_area_id,
                 "slot_id": slot_id,
-                "plate": plate,
                 "vehicle_id": vehicle_id,
                 "session_id": session_id,
                 "timestamp": event_time.isoformat(),
@@ -828,7 +719,6 @@ async def receive_vehicle_event(
                 "event_type": "ENTRY",
                 "session_id": session_id,
                 "vehicle_id": vehicle_id,
-                "plate": plate,
                 "camera_id": event.camera_id,
                 "parking_area_id": event.parking_area_id,
                 "slot_id": slot_id,
@@ -841,26 +731,16 @@ async def receive_vehicle_event(
         elif event.event_type == "EXIT":
 
             if not plate:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
                     detail="EXIT event requires vehicle plate",
                 )
 
             if not slot_id:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
                     detail="EXIT event requires parking.slot_id",
                 )
-
-            # -------------------------------------------------
-            # UNKNOWN VEHICLE
-            # -------------------------------------------------
 
             if vehicle_id is None:
 
@@ -871,14 +751,9 @@ async def receive_vehicle_event(
                     "event_id": event_id,
                     "event_type": "EXIT",
                     "message": "Vehicle not found",
-                    "plate": plate,
                     "camera_id": event.camera_id,
                     "slot_id": slot_id,
                 }
-
-            # -------------------------------------------------
-            # FIND OPEN SESSION
-            # -------------------------------------------------
 
             session = db.execute(
                 text("""
@@ -903,10 +778,6 @@ async def receive_vehicle_event(
                 },
             ).mappings().first()
 
-            # -------------------------------------------------
-            # NO OPEN SESSION
-            # -------------------------------------------------
-
             if not session:
 
                 db.commit()
@@ -916,21 +787,14 @@ async def receive_vehicle_event(
                     "event_id": event_id,
                     "event_type": "EXIT",
                     "message": "No open parking session found",
-                    "plate": plate,
                     "camera_id": event.camera_id,
                     "slot_id": slot_id,
                 }
 
-            # -------------------------------------------------
-            # CALCULATE DURATION
-            # -------------------------------------------------
-
             duration_result = db.execute(
                 text("""
                     SELECT EXTRACT(
-                        EPOCH FROM (
-                            :exit_time - :entry_time
-                        )
+                        EPOCH FROM (:exit_time - :entry_time)
                     )
                 """),
                 {
@@ -942,10 +806,6 @@ async def receive_vehicle_event(
             duration_seconds = int(
                 duration_result.scalar() or 0
             )
-
-            # -------------------------------------------------
-            # CLOSE SESSION
-            # -------------------------------------------------
 
             db.execute(
                 text("""
@@ -970,10 +830,6 @@ async def receive_vehicle_event(
                 },
             )
 
-            # -------------------------------------------------
-            # FREE SLOT
-            # -------------------------------------------------
-
             slot_update = db.execute(
                 text("""
                     UPDATE parking_slot_state
@@ -981,6 +837,8 @@ async def receive_vehicle_event(
                         status = 'available',
                         vehicle_fk = NULL,
                         plate_number = NULL,
+                        plate_number_ciphertext = NULL,
+                        plate_number_hmac = NULL,
                         track_id = NULL,
                         occupied_since = NULL,
                         updated_at = NOW()
@@ -994,22 +852,10 @@ async def receive_vehicle_event(
             )
 
             if slot_update.rowcount != 1:
-
-                db.rollback()
-
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Parking slot "
-                        f"{event.camera_id}/"
-                        f"{session['slot_id']} "
-                        f"could not be marked available"
-                    ),
+                    detail="Parking slot could not be marked available",
                 )
-
-            # -------------------------------------------------
-            # UPDATE VEHICLE
-            # -------------------------------------------------
 
             db.execute(
                 text("""
@@ -1025,15 +871,7 @@ async def receive_vehicle_event(
                 },
             )
 
-            # -------------------------------------------------
-            # COMMIT
-            # -------------------------------------------------
-
             db.commit()
-
-            # -------------------------------------------------
-            # WEBSOCKET
-            # -------------------------------------------------
 
             await parking_connections.broadcast({
                 "type": "PARKING_UPDATED",
@@ -1041,7 +879,6 @@ async def receive_vehicle_event(
                 "camera_id": event.camera_id,
                 "parking_area_id": event.parking_area_id,
                 "slot_id": session["slot_id"],
-                "plate": plate,
                 "vehicle_id": vehicle_id,
                 "session_id": session["id"],
                 "duration_seconds": duration_seconds,
@@ -1055,7 +892,6 @@ async def receive_vehicle_event(
                 "event_type": "EXIT",
                 "session_id": session["id"],
                 "vehicle_id": vehicle_id,
-                "plate": plate,
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(
                     duration_seconds / 60,
@@ -1099,9 +935,9 @@ async def receive_vehicle_event(
 
         db.rollback()
 
+        # Do not log event payloads or plate values.
         print(
-            f"[EVENT ERROR] "
-            f"{type(error).__name__}: {error}",
+            f"[EVENT ERROR] {type(error).__name__}",
             flush=True,
         )
 
