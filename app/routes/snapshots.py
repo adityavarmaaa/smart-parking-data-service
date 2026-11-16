@@ -43,22 +43,21 @@ def get_vehicle_snapshots(
     # =========================================================
 
     vehicle = db.execute(
-        text("""
-            SELECT id
-FROM vehicles
-WHERE plate_number_hmac = :plate_hmac
-   OR (
-       plate_number_hmac IS NULL
-       AND plate_number = :plate
-   )
-LIMIT 1
-            LIMIT 1
-        """),
-        {
-             "plate_hmac": plate_hmac(plate_number),
-            "plate": plate_number,
-        },
-    ).mappings().first()
+    text("""
+        SELECT id
+        FROM vehicles
+        WHERE plate_number_hmac = :plate_hmac
+           OR (
+               plate_number_hmac IS NULL
+               AND plate_number = :plate
+           )
+        LIMIT 1
+    """),
+    {
+        "plate_hmac": plate_hmac(plate_number),
+        "plate": plate_number,
+    },
+).mappings().first()
 
     if not vehicle:
         raise HTTPException(
