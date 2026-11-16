@@ -3,6 +3,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database.dependencies import get_db
+from app.security import plate_hmac
 
 
 router = APIRouter(
@@ -43,14 +44,18 @@ def get_vehicle_snapshots(
 
     vehicle = db.execute(
         text("""
-            SELECT
-                id,
-                plate_number
-            FROM vehicles
-            WHERE plate_number = :plate
+            SELECT id
+FROM vehicles
+WHERE plate_number_hmac = :plate_hmac
+   OR (
+       plate_number_hmac IS NULL
+       AND plate_number = :plate
+   )
+LIMIT 1
             LIMIT 1
         """),
         {
+             "plate_hmac": plate_hmac(plate_number),
             "plate": plate_number,
         },
     ).mappings().first()
@@ -150,7 +155,7 @@ def get_vehicle_snapshots(
 
     return {
         "status": "success",
-        "plate_number": plate_number,
+       
 
         "vehicle_snapshot": (
             session["entry_screenshot_url"]
