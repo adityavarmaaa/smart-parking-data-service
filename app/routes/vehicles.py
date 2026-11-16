@@ -3,6 +3,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database.dependencies import get_db
+from app.security import plate_hmac
 
 
 router = APIRouter(
@@ -42,7 +43,7 @@ def get_vehicle(
         text("""
             SELECT
                 v.id,
-                v.plate_number,
+              
                 vt.code AS vehicle_type,
                 vc.code AS color,
                 v.first_seen_at,
@@ -55,10 +56,15 @@ def get_vehicle(
             LEFT JOIN vehicle_colors vc
                 ON vc.id = v.color_fk
 
-            WHERE v.plate_number = :plate
+           WHERE v.plate_number_hmac = :plate_hmac
+   OR (
+       v.plate_number_hmac IS NULL
+       AND v.plate_number = :plate
+   )
             LIMIT 1
         """),
         {
+            "plate_hmac": plate_hmac(plate_number),
             "plate": plate_number,
         },
     ).mappings().first()
@@ -195,7 +201,7 @@ def get_vehicle(
 
         "vehicle": {
             "id": vehicle["id"],
-            "plate_number": vehicle["plate_number"],
+            
             "vehicle_type": vehicle["vehicle_type"],
             "color": vehicle["color"],
             "first_seen_at": vehicle["first_seen_at"],
