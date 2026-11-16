@@ -334,6 +334,7 @@ async def receive_vehicle_event(
                     text("""
                         UPDATE vehicles
                         SET
+                            plate_number = NULL,
                             plate_number_ciphertext = :ciphertext,
                             plate_number_hmac = :plate_hmac,
                             vehicle_type_fk = COALESCE(
