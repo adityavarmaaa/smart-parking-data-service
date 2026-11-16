@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.database.dependencies import get_db
 from app.schemas.vehicle_event import VehicleEvent
 from app.realtime import parking_connections
+from app.security import encrypt_text, plate_hmac
 
 
 router = APIRouter(
