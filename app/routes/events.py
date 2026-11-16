@@ -383,6 +383,8 @@ async def receive_vehicle_event(
         # =====================================================
 
         plate = event.vehicle.plate
+        plate_ciphertext = encrypt_text(plate) if plate else None
+        plate_fingerprint = plate_hmac(plate) if plate else None
         vehicle_id = None
 
         if plate:
@@ -394,11 +396,11 @@ async def receive_vehicle_event(
                         vehicle_type_fk,
                         color_fk
                     FROM vehicles
-                    WHERE plate_number = :plate
+                    WHERE plate_number_hmac = :plate_hmac  OR plate_number = :plate
                     LIMIT 1
                 """),
                 {
-                    "plate": plate,
+                   "plate_hmac": plate_fingerprint,
                 },
             ).mappings().first()
 
