@@ -38,6 +38,10 @@ def require_s2_api_key(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# =========================================================
+# EVENT IDEMPOTENCY
+# =========================================================
+
 def _find_existing_event(
     db,
     event,
@@ -58,19 +62,21 @@ def _find_existing_event(
               AND timestamp = :timestamp
               AND (
                   (
-                      :vehicle_uid IS NOT NULL
-                      AND vehicle_uid = :vehicle_uid
+                      CAST(:vehicle_uid AS TEXT) IS NOT NULL
+                      AND vehicle_uid = CAST(:vehicle_uid AS TEXT)
                   )
                   OR (
-                      :vehicle_uid IS NULL
+                      CAST(:vehicle_uid AS TEXT) IS NULL
                       AND (
                           (
-                              :plate_hmac IS NOT NULL
-                              AND plate_number_hmac = :plate_hmac
+                              CAST(:plate_hmac AS TEXT) IS NOT NULL
+                              AND plate_number_hmac =
+                                  CAST(:plate_hmac AS TEXT)
                           )
                           OR (
                               plate_number_hmac IS NULL
-                              AND plate_number IS NOT DISTINCT FROM :plate
+                              AND plate_number IS NOT DISTINCT FROM
+                                  CAST(:plate AS TEXT)
                           )
                       )
                   )
@@ -91,6 +97,10 @@ def _find_existing_event(
     ).scalar()
 
 
+# =========================================================
+# FIND ACTIVE PARKING SESSION
+# =========================================================
+
 def _active_session(
     db,
     parking_area_id,
@@ -101,7 +111,7 @@ def _active_session(
     if vehicle_uid:
         return db.execute(
             text("""
-                SELECT id, slot_id, vehicle_uid
+                SELECT id, slot_id, vehicle_uid, vehicle_fk
                 FROM parking_sessions
                 WHERE parking_area_id = :area_id
                   AND camera_id = :camera_id
@@ -120,7 +130,7 @@ def _active_session(
     if vehicle_id is not None:
         return db.execute(
             text("""
-                SELECT id, slot_id, vehicle_uid
+                SELECT id, slot_id, vehicle_uid, vehicle_fk
                 FROM parking_sessions
                 WHERE parking_area_id = :area_id
                   AND camera_id = :camera_id
@@ -168,6 +178,7 @@ async def receive_vehicle_event(
             else None
         )
 
+        # Never store the plate in plaintext.
         plate_ciphertext = encrypt_text(plate) if plate else None
         plate_fingerprint = plate_hmac(plate) if plate else None
 
@@ -177,7 +188,10 @@ async def receive_vehicle_event(
             if not vehicle_uid and not plate:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"{event.event_type} requires vehicle_uid or a confirmed plate",
+                    detail=(
+                        f"{event.event_type} requires vehicle_uid "
+                        "or a confirmed plate"
+                    ),
                 )
 
             if not slot_id:
@@ -287,6 +301,7 @@ async def receive_vehicle_event(
 
         if existing_event is not None:
             db.rollback()
+
             return {
                 "status": "duplicate",
                 "event_id": existing_event,
@@ -336,10 +351,16 @@ async def receive_vehicle_event(
             db.execute(
                 text("""
                     INSERT INTO parking_slots (
-                        camera_id, slot_id, polygon, status
+                        camera_id,
+                        slot_id,
+                        polygon,
+                        status
                     )
                     VALUES (
-                        :camera_id, :slot_id, NULL, 'available'
+                        :camera_id,
+                        :slot_id,
+                        NULL,
+                        'available'
                     )
                     ON CONFLICT (camera_id, slot_id)
                     DO NOTHING
@@ -419,9 +440,13 @@ async def receive_vehicle_event(
                             plate_number_ciphertext = :ciphertext,
                             plate_number_hmac = :plate_hmac,
                             vehicle_type_fk = COALESCE(
-                                :vehicle_type_fk, vehicle_type_fk
+                                :vehicle_type_fk,
+                                vehicle_type_fk
                             ),
-                            color_fk = COALESCE(:color_fk, color_fk),
+                            color_fk = COALESCE(
+                                :color_fk,
+                                color_fk
+                            ),
                             last_seen_at = :timestamp,
                             updated_at = NOW()
                         WHERE id = :vehicle_id
@@ -435,6 +460,7 @@ async def receive_vehicle_event(
                         "timestamp": event_time,
                     },
                 )
+
             else:
                 vehicle_id = db.execute(
                     text("""
@@ -492,7 +518,9 @@ async def receive_vehicle_event(
                 if active["slot_id"] == slot_id:
                     return {
                         "status": "already_parked",
-                        "message": "An active parking session already exists",
+                        "message": (
+                            "An active parking session already exists"
+                        ),
                         "session_id": active["id"],
                         "slot_id": active["slot_id"],
                         "vehicle_uid": active["vehicle_uid"],
@@ -500,7 +528,10 @@ async def receive_vehicle_event(
 
                 raise HTTPException(
                     status_code=409,
-                    detail="Vehicle already has an active session in another slot",
+                    detail=(
+                        "Vehicle already has an active session "
+                        "in another slot"
+                    ),
                 )
 
             # Never overwrite a slot occupied by another vehicle.
@@ -523,7 +554,9 @@ async def receive_vehicle_event(
             if not slot_state:
                 raise HTTPException(
                     status_code=409,
-                    detail="Parking slot state could not be initialized",
+                    detail=(
+                        "Parking slot state could not be initialized"
+                    ),
                 )
 
             if slot_state["status"] == "occupied":
@@ -531,6 +564,7 @@ async def receive_vehicle_event(
                     vehicle_uid is not None
                     and slot_state["vehicle_uid"] == vehicle_uid
                 )
+
                 same_vehicle = (
                     vehicle_uid is None
                     and vehicle_id is not None
@@ -540,7 +574,10 @@ async def receive_vehicle_event(
                 if not (same_uid or same_vehicle):
                     raise HTTPException(
                         status_code=409,
-                        detail="Parking slot is already occupied by another vehicle",
+                        detail=(
+                            "Parking slot is already occupied "
+                            "by another vehicle"
+                        ),
                     )
 
         # =================================================
@@ -617,7 +654,9 @@ async def receive_vehicle_event(
                 "timestamp": event.timestamp,
                 "captured_at": event_time,
                 "vehicle_type": event.vehicle.type,
-                "vehicle_type_confidence": event.vehicle.type_confidence,
+                "vehicle_type_confidence": (
+                    event.vehicle.type_confidence
+                ),
                 "color": event.vehicle.color,
                 "color_confidence": event.vehicle.color_confidence,
                 "plate_ciphertext": plate_ciphertext,
@@ -625,13 +664,16 @@ async def receive_vehicle_event(
                 "plate_confidence": event.vehicle.plate_confidence,
                 "slot_id": slot_id,
                 "slot_confidence": (
-                    event.parking.slot_confidence if event.parking else None
+                    event.parking.slot_confidence
+                    if event.parking else None
                 ),
                 "vehicle_snapshot": (
-                    event.snapshot.vehicle if event.snapshot else None
+                    event.snapshot.vehicle
+                    if event.snapshot else None
                 ),
                 "plate_snapshot": (
-                    event.snapshot.plate if event.snapshot else None
+                    event.snapshot.plate
+                    if event.snapshot else None
                 ),
                 "vehicle_fk": vehicle_id,
                 "observed_vehicle_type": event.vehicle.type,
@@ -642,7 +684,7 @@ async def receive_vehicle_event(
         ).scalar_one()
 
         # =================================================
-        # 11. ENTRY
+        # 11. ENTRY: CREATE SESSION AND OCCUPY SLOT
         # =================================================
 
         if event.event_type == "ENTRY":
@@ -700,7 +742,8 @@ async def receive_vehicle_event(
                     "slot_id": slot_id,
                     "entry_time": event_time,
                     "snapshot": (
-                        event.snapshot.vehicle if event.snapshot else None
+                        event.snapshot.vehicle
+                        if event.snapshot else None
                     ),
                 },
             ).scalar()
@@ -727,12 +770,18 @@ async def receive_vehicle_event(
 
                     raise HTTPException(
                         status_code=409,
-                        detail="Vehicle already has an active session in another slot",
+                        detail=(
+                            "Vehicle already has an active session "
+                            "in another slot"
+                        ),
                     )
 
                 raise HTTPException(
                     status_code=409,
-                    detail="Could not create parking session; retry the event",
+                    detail=(
+                        "Could not create parking session; "
+                        "retry the event"
+                    ),
                 )
 
             slot_update = db.execute(
@@ -769,7 +818,9 @@ async def receive_vehicle_event(
             if slot_update.rowcount != 1:
                 raise HTTPException(
                     status_code=409,
-                    detail="Parking slot is occupied or could not be updated",
+                    detail=(
+                        "Parking slot is occupied or could not be updated"
+                    ),
                 )
 
             db.commit()
@@ -800,52 +851,79 @@ async def receive_vehicle_event(
             }
 
         # =================================================
-        # 12. EXIT
+        # 12. EXIT: FIND AND CLOSE ACTIVE SESSION
         # =================================================
 
         if event.event_type == "EXIT":
-            session = db.execute(
-                text("""
-                    SELECT
-                        id,
-                        vehicle_fk,
-                        vehicle_uid,
-                        entry_time,
-                        slot_id,
-                        camera_id
-                    FROM parking_sessions
-                    WHERE parking_area_id = :area_id
-                      AND camera_id = :camera_id
-                      AND slot_id = :slot_id
-                      AND status = 'parked'
-                      AND (
-                          (
-                              :vehicle_uid IS NOT NULL
-                              AND vehicle_uid = :vehicle_uid
-                          )
-                          OR (
-                              :vehicle_uid IS NULL
-                              AND :vehicle_id IS NOT NULL
-                              AND vehicle_fk = :vehicle_id
-                          )
-                      )
-                    ORDER BY entry_time DESC
-                    LIMIT 1
-                    FOR UPDATE
-                """),
-                {
-                    "area_id": event.parking_area_id,
-                    "camera_id": event.camera_id,
-                    "slot_id": slot_id,
-                    "vehicle_uid": vehicle_uid,
-                    "vehicle_id": vehicle_id,
-                },
-            ).mappings().first()
+
+            # Use UID first. If there is no UID, use the
+            # resolved vehicle database ID.
+            if vehicle_uid:
+                session = db.execute(
+                    text("""
+                        SELECT
+                            id,
+                            vehicle_fk,
+                            vehicle_uid,
+                            entry_time,
+                            slot_id,
+                            camera_id
+                        FROM parking_sessions
+                        WHERE parking_area_id = :area_id
+                          AND camera_id = :camera_id
+                          AND slot_id = :slot_id
+                          AND status = 'parked'
+                          AND vehicle_uid = :vehicle_uid
+                        ORDER BY entry_time DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    """),
+                    {
+                        "area_id": event.parking_area_id,
+                        "camera_id": event.camera_id,
+                        "slot_id": slot_id,
+                        "vehicle_uid": vehicle_uid,
+                    },
+                ).mappings().first()
+
+            elif vehicle_id is not None:
+                session = db.execute(
+                    text("""
+                        SELECT
+                            id,
+                            vehicle_fk,
+                            vehicle_uid,
+                            entry_time,
+                            slot_id,
+                            camera_id
+                        FROM parking_sessions
+                        WHERE parking_area_id = :area_id
+                          AND camera_id = :camera_id
+                          AND slot_id = :slot_id
+                          AND status = 'parked'
+                          AND vehicle_fk = :vehicle_id
+                        ORDER BY entry_time DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    """),
+                    {
+                        "area_id": event.parking_area_id,
+                        "camera_id": event.camera_id,
+                        "slot_id": slot_id,
+                        "vehicle_id": vehicle_id,
+                    },
+                ).mappings().first()
+
+            else:
+                session = None
 
             if not session:
                 raise HTTPException(
                     status_code=409,
-                    detail="No matching open parking session found; EXIT was not recorded",
+                    detail=(
+                        "No matching open parking session found; "
+                        "EXIT was not recorded"
+                    ),
                 )
 
             duration_seconds = max(
@@ -880,59 +958,86 @@ async def receive_vehicle_event(
                     "exit_time": event_time,
                     "duration": duration_seconds,
                     "snapshot": (
-                        event.snapshot.vehicle if event.snapshot else None
+                        event.snapshot.vehicle
+                        if event.snapshot else None
                     ),
                     "session_id": session["id"],
                 },
             )
 
-            slot_update = db.execute(
-                text("""
-                    UPDATE parking_slot_state
-                    SET
-                        status = 'available',
-                        vehicle_fk = NULL,
-                        vehicle_uid = NULL,
-                        plate_number = NULL,
-                        plate_number_ciphertext = NULL,
-                        plate_number_hmac = NULL,
-                        track_id = NULL,
-                        occupied_since = NULL,
-                        updated_at = NOW()
-                    WHERE camera_id = :camera_id
-                      AND slot_id = :slot_id
-                      AND parking_area_id = :area_id
-                      AND (
-                          (
-                              :vehicle_uid IS NOT NULL
-                              AND vehicle_uid = :vehicle_uid
-                          )
-                          OR (
-                              :vehicle_uid IS NULL
-                              AND vehicle_fk = :vehicle_id
-                          )
-                      )
-                """),
-                {
-                    "camera_id": event.camera_id,
-                    "slot_id": session["slot_id"],
-                    "area_id": event.parking_area_id,
-                    "vehicle_uid": vehicle_uid,
-                    "vehicle_id": session["vehicle_fk"],
-                },
-            )
+            # Clear slot state using the identity stored
+            # in the session that was actually closed.
+            if session["vehicle_uid"]:
+                slot_update = db.execute(
+                    text("""
+                        UPDATE parking_slot_state
+                        SET
+                            status = 'available',
+                            vehicle_fk = NULL,
+                            vehicle_uid = NULL,
+                            plate_number = NULL,
+                            plate_number_ciphertext = NULL,
+                            plate_number_hmac = NULL,
+                            track_id = NULL,
+                            occupied_since = NULL,
+                            updated_at = NOW()
+                        WHERE camera_id = :camera_id
+                          AND slot_id = :slot_id
+                          AND parking_area_id = :area_id
+                          AND vehicle_uid = :vehicle_uid
+                    """),
+                    {
+                        "camera_id": event.camera_id,
+                        "slot_id": session["slot_id"],
+                        "area_id": event.parking_area_id,
+                        "vehicle_uid": session["vehicle_uid"],
+                    },
+                )
 
-            if slot_update.rowcount != 1:
+            elif session["vehicle_fk"] is not None:
+                slot_update = db.execute(
+                    text("""
+                        UPDATE parking_slot_state
+                        SET
+                            status = 'available',
+                            vehicle_fk = NULL,
+                            vehicle_uid = NULL,
+                            plate_number = NULL,
+                            plate_number_ciphertext = NULL,
+                            plate_number_hmac = NULL,
+                            track_id = NULL,
+                            occupied_since = NULL,
+                            updated_at = NOW()
+                        WHERE camera_id = :camera_id
+                          AND slot_id = :slot_id
+                          AND parking_area_id = :area_id
+                          AND vehicle_fk = :vehicle_id
+                    """),
+                    {
+                        "camera_id": event.camera_id,
+                        "slot_id": session["slot_id"],
+                        "area_id": event.parking_area_id,
+                        "vehicle_id": session["vehicle_fk"],
+                    },
+                )
+
+            else:
+                slot_update = None
+
+            if slot_update is None or slot_update.rowcount != 1:
                 raise HTTPException(
                     status_code=409,
-                    detail="Slot state does not match the exiting vehicle",
+                    detail=(
+                        "Slot state does not match the exiting vehicle"
+                    ),
                 )
 
             if session["vehicle_fk"] is not None:
                 db.execute(
                     text("""
                         UPDATE vehicles
-                        SET last_seen_at = :timestamp,
+                        SET
+                            last_seen_at = :timestamp,
                             updated_at = NOW()
                         WHERE id = :vehicle_id
                     """),
@@ -966,7 +1071,10 @@ async def receive_vehicle_event(
                 "vehicle_id": session["vehicle_fk"],
                 "vehicle_uid": session["vehicle_uid"],
                 "duration_seconds": duration_seconds,
-                "duration_minutes": round(duration_seconds / 60, 2),
+                "duration_minutes": round(
+                    duration_seconds / 60,
+                    2,
+                ),
                 "camera_id": event.camera_id,
                 "parking_area_id": event.parking_area_id,
                 "slot_id": session["slot_id"],
@@ -1002,9 +1110,13 @@ async def receive_vehicle_event(
 
     except IntegrityError:
         db.rollback()
+
         raise HTTPException(
             status_code=409,
-            detail="Database constraint conflict; event was not committed",
+            detail=(
+                "Database constraint conflict; "
+                "event was not committed"
+            ),
         )
 
     except Exception as error:
@@ -1012,7 +1124,9 @@ async def receive_vehicle_event(
 
         # Never log event payloads or plate values.
         print(
-            f"[EVENT ERROR] {type(error).__name__}: {str(error)[:1500]}",
+            f"[EVENT ERROR] {type(error).__name__}: "
+            f"{str(error)[:1500]}",
             flush=True,
         )
+
         raise
