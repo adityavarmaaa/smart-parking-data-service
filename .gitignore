@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 *.backup
 *.backup-final
+.pytest_cache/

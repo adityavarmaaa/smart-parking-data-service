@@ -375,7 +375,7 @@ async def receive_vehicle_event(
                             color
                         )
                         VALUES (
-                            :plate,
+                            NULL,
                             :ciphertext,
                             :plate_hmac,
                             :vehicle_type_fk,
@@ -673,7 +673,7 @@ async def receive_vehicle_event(
                     SET
                         status = 'occupied',
                         vehicle_fk = :vehicle_id,
-                        plate_number = :plate,
+                        plate_number = NULL,
                         plate_number_ciphertext = :ciphertext,
                         plate_number_hmac = :plate_hmac,
                         track_id = :track_id,
