@@ -1,3 +1,4 @@
+
 from datetime import datetime
 from typing import Optional
 
@@ -27,9 +28,11 @@ class VehicleEvent(BaseModel):
     event_type: str
     camera_id: str
     parking_area_id: str
+    vehicle_uid: Optional[str] = None
     track_id: Optional[int] = None
     timestamp: datetime
     captured_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
 
     vehicle: VehicleData
     parking: Optional[ParkingData] = None
