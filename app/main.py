@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, WebSocket
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,9 +32,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -49,26 +50,11 @@ app.include_router(snapshots_router)
 
 
 # =========================================================
-# WEBSOCKET — REAL-TIME PARKING UPDATES
+# WEBSOCKET
 # =========================================================
 
 @app.websocket("/ws/parking")
 async def parking_live_updates(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time parking updates.
-
-    The connection is accepted here and then handed over
-    to parking_websocket(), which handles:
-
-    - authentication
-    - connection registration
-    - heartbeat
-    - client messages
-    - disconnect cleanup
-    """
-
-    await websocket.accept()
-
     await parking_websocket(websocket)
 
 
@@ -99,9 +85,8 @@ def database_health():
             "database": "connected",
         }
 
-    except Exception as error:
+    except Exception:
         return {
             "status": "unhealthy",
             "database": "disconnected",
-            "error": str(error),
         }

@@ -1,5 +1,8 @@
 
-from fastapi import APIRouter, Depends, HTTPException
+import hmac
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,13 +19,56 @@ router = APIRouter(
 )
 
 
+# =========================================================
+# SERVICE 1 -> SERVICE 2 API AUTHENTICATION
+# =========================================================
+
+def require_s2_api_key(
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
+    ),
+):
+    """
+    Authenticate Service 1 requests using a shared API key.
+
+    Service 1 sends:
+        X-API-Key: <S2_API_KEY>
+
+    Service 2 must configure the same S2_API_KEY
+    environment variable.
+    """
+
+    expected_key = os.getenv("S2_API_KEY", "").strip()
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=503,
+            detail="API authentication is not configured",
+        )
+
+    if not x_api_key or not hmac.compare_digest(
+        x_api_key,
+        expected_key,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+        )
+
+
+# =========================================================
+# RECEIVE VEHICLE EVENT
+# =========================================================
+
 @router.post("/vehicle")
 async def receive_vehicle_event(
     event: VehicleEvent,
+    _: None = Depends(require_s2_api_key),
     db: Session = Depends(get_db),
 ):
     """
-    Receive and persist vehicle events.
+    Receive and persist authenticated vehicle events.
 
     Plate protection:
         - AES-GCM ciphertext stored in encrypted columns.
@@ -520,7 +566,6 @@ async def receive_vehicle_event(
                         else None
                     ),
 
-                    # This is a snapshot path/URL, not a plate value.
                     "plate_snapshot": (
                         event.snapshot.plate
                         if event.snapshot
@@ -684,7 +729,6 @@ async def receive_vehicle_event(
                 """),
                 {
                     "vehicle_id": vehicle_id,
-                    "plate": None,
                     "ciphertext": plate_ciphertext,
                     "plate_hmac": plate_fingerprint,
                     "track_id": event.track_id,
@@ -928,12 +972,10 @@ async def receive_vehicle_event(
             }
 
     except HTTPException:
-
         db.rollback()
         raise
 
     except Exception as error:
-
         db.rollback()
 
         # Do not log event payloads or plate values.
