@@ -1012,7 +1012,7 @@ async def receive_vehicle_event(
 
         # Never log event payloads or plate values.
         print(
-            f"[EVENT ERROR] {type(error).__name__}",
+            f"[EVENT ERROR] {type(error).__name__}: {str(error)[:1500]}",
             flush=True,
         )
         raise
