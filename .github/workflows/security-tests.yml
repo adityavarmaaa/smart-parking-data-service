@@ -1,0 +1,39 @@
+﻿name: S2 Security Tests
+
+on:
+  push:
+    branches:
+      - plate-encryption-migration
+  pull_request:
+    branches:
+      - plate-encryption-migration
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci
+      S2_API_KEY: ci-test-only-key
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: Run security regression tests
+        run: python -m pytest tests -q
