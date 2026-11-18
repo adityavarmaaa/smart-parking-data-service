@@ -1,8 +1,6 @@
 
-import hmac
-import os
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,32 +8,14 @@ from sqlalchemy.orm import Session
 from app.database.dependencies import get_db
 from app.schemas.vehicle_event import VehicleEvent
 from app.realtime import parking_connections
-from app.security import encrypt_text, plate_hmac
+from app.security import encrypt_text, plate_hmac, plate_hmac_candidates
+from app.auth import require_s2_api_key
 
 
 router = APIRouter(
     prefix="/internal/events",
     tags=["Vehicle Events"],
 )
-
-
-# =========================================================
-# SERVICE 1 -> SERVICE 2 API AUTHENTICATION
-# =========================================================
-
-def require_s2_api_key(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-):
-    expected_key = os.getenv("S2_API_KEY", "").strip()
-
-    if not expected_key:
-        raise HTTPException(
-            status_code=503,
-            detail="API authentication is not configured",
-        )
-
-    if not x_api_key or not hmac.compare_digest(x_api_key, expected_key):
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # =========================================================
@@ -47,6 +27,7 @@ def _find_existing_event(
     event,
     vehicle_uid,
     plate_fingerprint,
+    plate_fingerprints,
     plate,
     slot_id,
 ):
@@ -69,14 +50,9 @@ def _find_existing_event(
                       CAST(:vehicle_uid AS TEXT) IS NULL
                       AND (
                           (
-                              CAST(:plate_hmac AS TEXT) IS NOT NULL
+                              cardinality(CAST(:plate_hmacs AS TEXT[])) > 0
                               AND plate_number_hmac =
-                                  CAST(:plate_hmac AS TEXT)
-                          )
-                          OR (
-                              plate_number_hmac IS NULL
-                              AND plate_number IS NOT DISTINCT FROM
-                                  CAST(:plate AS TEXT)
+                                  ANY(CAST(:plate_hmacs AS TEXT[]))
                           )
                       )
                   )
@@ -91,8 +67,7 @@ def _find_existing_event(
             "slot_id": slot_id,
             "timestamp": event.timestamp,
             "vehicle_uid": vehicle_uid,
-            "plate_hmac": plate_fingerprint,
-            "plate": plate,
+            "plate_hmacs": plate_fingerprints,
         },
     ).scalar()
 
@@ -181,6 +156,7 @@ async def receive_vehicle_event(
         # Never store the plate in plaintext.
         plate_ciphertext = encrypt_text(plate) if plate else None
         plate_fingerprint = plate_hmac(plate) if plate else None
+        plate_fingerprints = plate_hmac_candidates(plate) if plate else []
 
         slot_id = event.parking.slot_id if event.parking else None
 
@@ -295,6 +271,7 @@ async def receive_vehicle_event(
             event,
             vehicle_uid,
             plate_fingerprint,
+            plate_fingerprints,
             plate,
             slot_id,
         )
@@ -416,16 +393,11 @@ async def receive_vehicle_event(
                 text("""
                     SELECT id
                     FROM vehicles
-                    WHERE plate_number_hmac = :plate_hmac
-                       OR (
-                           plate_number_hmac IS NULL
-                           AND plate_number = :plate
-                       )
+                    WHERE plate_number_hmac = ANY(CAST(:plate_hmacs AS TEXT[]))
                     LIMIT 1
                 """),
                 {
-                    "plate_hmac": plate_fingerprint,
-                    "plate": plate,
+                    "plate_hmacs": plate_fingerprints,
                 },
             ).mappings().first()
 

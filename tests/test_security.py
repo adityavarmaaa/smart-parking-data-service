@@ -9,6 +9,7 @@ from app.security import (
     encrypt_text,
     decrypt_text,
     plate_hmac,
+    plate_hmac_candidates,
     normalize_plate,
 )
 
@@ -56,6 +57,44 @@ class PlateSecurityTests(unittest.TestCase):
             plate_hmac("TS09AB1234"),
             plate_hmac(" ts 09 ab 1234 ")
         )
+
+    def test_hmac_keyring_supports_historical_and_active_keys(self):
+        plate = "TS09AB1234"
+        old_key = base64.b64encode(os.urandom(32)).decode()
+        current_key = base64.b64encode(os.urandom(32)).decode()
+
+        with patch.dict(os.environ, {"SP_HMAC_KEY": old_key}, clear=True):
+            old_digest = plate_hmac(plate)
+
+        with patch.dict(os.environ, {"SP_HMAC_KEY": current_key}, clear=True):
+            expected_current_digest = plate_hmac(plate)
+
+        with patch.dict(os.environ, {
+            "SP_HMAC_KEYS": json.dumps({
+                "historical": old_key,
+                "current": current_key,
+            }),
+            "SP_ACTIVE_HMAC_KEY": "current",
+        }, clear=True):
+            candidates = plate_hmac_candidates(plate)
+
+            self.assertEqual(plate_hmac(plate), expected_current_digest)
+            self.assertIn(old_digest, candidates)
+            self.assertIn(expected_current_digest, candidates)
+            self.assertEqual(len(candidates), 2)
+
+    def test_empty_hmac_keyring_uses_legacy_key(self):
+        legacy_key = base64.b64encode(os.urandom(32)).decode()
+
+        with patch.dict(os.environ, {
+            "SP_HMAC_KEYS": "",
+            "SP_HMAC_KEY": legacy_key,
+        }, clear=True):
+            self.assertEqual(
+                len(plate_hmac_candidates("TEST-PLATE")),
+                1,
+            )
+            self.assertTrue(plate_hmac("TEST-PLATE"))
 
     def test_none_values(self):
         self.assertIsNone(encrypt_text(None))

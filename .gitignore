@@ -5,3 +5,8 @@ __pycache__/
 *.backup
 *.backup-final
 .pytest_cache/
+
+# Local secrets and sensitive recovery files
+.env.backup_before_key_recovery
+s2_key_temp.txt
+/backups/

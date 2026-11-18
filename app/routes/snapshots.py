@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
+from app.auth import require_s2_api_key
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database.dependencies import get_db
-from app.security import plate_hmac
+from app.security import plate_hmac_candidates
 
 
 router = APIRouter(
@@ -15,6 +16,7 @@ router = APIRouter(
 @router.get("/vehicle/{plate_number}")
 def get_vehicle_snapshots(
     plate_number: str,
+    _: None = Depends(require_s2_api_key),
     db: Session = Depends(get_db),
 ):
     """
@@ -23,9 +25,9 @@ def get_vehicle_snapshots(
     Canonical vehicle identity is resolved through:
 
         vehicles.id
-            ↓
+            â†“
         parking_sessions.vehicle_fk
-            ↓
+            â†“
         parking_events.vehicle_fk
 
     parking_events.vehicle_snapshot and plate_snapshot contain
@@ -46,16 +48,11 @@ def get_vehicle_snapshots(
     text("""
         SELECT id
         FROM vehicles
-        WHERE plate_number_hmac = :plate_hmac
-           OR (
-               plate_number_hmac IS NULL
-               AND plate_number = :plate
-           )
+        WHERE plate_number_hmac = ANY(CAST(:plate_hmacs AS TEXT[]))
         LIMIT 1
     """),
     {
-        "plate_hmac": plate_hmac(plate_number),
-        "plate": plate_number,
+        "plate_hmacs": plate_hmac_candidates(plate_number),
     },
 ).mappings().first()
 

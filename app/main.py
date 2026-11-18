@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database.connection import engine
 
 from app.routes.events import router as events_router
+from app.routes.geometry import router as geometry_router
 from app.routes.occupancy import router as occupancy_router
 from app.routes.analytics import router as analytics_router
 from app.routes.vehicles import router as vehicles_router
@@ -43,6 +44,7 @@ app.add_middleware(
 # =========================================================
 
 app.include_router(events_router)
+app.include_router(geometry_router)
 app.include_router(occupancy_router)
 app.include_router(analytics_router)
 app.include_router(vehicles_router)

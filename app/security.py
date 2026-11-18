@@ -1,4 +1,3 @@
-
 import base64
 import hashlib
 import hmac
@@ -18,6 +17,9 @@ def _load_keys():
         keys = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError("SP_ENCRYPTION_KEYS must contain valid JSON") from exc
+
+    if not isinstance(keys, dict):
+        raise RuntimeError("SP_ENCRYPTION_KEYS must be a JSON object")
 
     decoded = {}
     for key_id, value in keys.items():
@@ -39,16 +41,54 @@ def _active_key():
     return key_id, keys[key_id]
 
 
-def _hmac_key():
-    raw = os.environ.get("SP_HMAC_KEY")
-    if not raw:
-        raise RuntimeError("SP_HMAC_KEY is not configured")
+def _decode_hmac_key(key_id, value):
+    try:
+        key = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise RuntimeError(f"HMAC key {key_id!r} is not valid base64") from exc
 
-    key = base64.b64decode(raw, validate=True)
     if len(key) < 32:
-        raise RuntimeError("SP_HMAC_KEY must be at least 32 bytes")
+        raise RuntimeError(f"HMAC key {key_id!r} must be at least 32 bytes")
 
     return key
+
+
+def _load_hmac_keys():
+    raw = os.environ.get("SP_HMAC_KEYS")
+
+    if raw:
+        try:
+            configured = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("SP_HMAC_KEYS must contain valid JSON") from exc
+
+        if not isinstance(configured, dict) or not configured:
+            raise RuntimeError("SP_HMAC_KEYS must be a non-empty JSON object")
+
+        return {
+            key_id: _decode_hmac_key(key_id, value)
+            for key_id, value in configured.items()
+        }
+
+    # Backward compatibility with the existing single-key deployment.
+    legacy = os.environ.get("SP_HMAC_KEY")
+    if not legacy:
+        raise RuntimeError("SP_HMAC_KEYS or SP_HMAC_KEY must be configured")
+
+    return {"legacy": _decode_hmac_key("legacy", legacy)}
+
+
+def _active_hmac_key():
+    keys = _load_hmac_keys()
+
+    if not os.environ.get("SP_HMAC_KEYS"):
+        return keys["legacy"]
+
+    active_id = os.environ.get("SP_ACTIVE_HMAC_KEY")
+    if not active_id or active_id not in keys:
+        raise RuntimeError("Active HMAC key is missing or invalid")
+
+    return keys[active_id]
 
 
 def normalize_plate(plate):
@@ -116,15 +156,31 @@ def decrypt_text(value):
     return plaintext.decode("utf-8")
 
 
-def plate_hmac(plate):
+def _plate_digest(plate, key):
     normalized = normalize_plate(plate)
-    digest = hmac.new(
-        _hmac_key(),
+    return hmac.new(
+        key,
         normalized.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
-    return digest
+
+def plate_hmac(plate):
+    """Generate the digest used for new database writes."""
+    return _plate_digest(plate, _active_hmac_key())
+
+
+def plate_hmac_candidates(plate):
+    """Generate lookup digests for all configured current and historical keys."""
+    keys = _load_hmac_keys()
+    candidates = []
+
+    for key in keys.values():
+        digest = _plate_digest(plate, key)
+        if digest not in candidates:
+            candidates.append(digest)
+
+    return candidates
 
 
 def json_hmac(data):
@@ -136,7 +192,7 @@ def json_hmac(data):
     ).encode("utf-8")
 
     return hmac.new(
-        _hmac_key(),
+        _active_hmac_key(),
         canonical,
         hashlib.sha256,
     ).hexdigest()
@@ -146,5 +202,16 @@ def verify_json_hmac(data, expected):
     if not expected:
         return False
 
-    actual = json_hmac(data)
-    return hmac.compare_digest(actual, expected)
+    canonical = json.dumps(
+        data,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    for key in _load_hmac_keys().values():
+        actual = hmac.new(key, canonical, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(actual, expected):
+            return True
+
+    return False

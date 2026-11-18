@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
+from app.auth import require_s2_api_key
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database.dependencies import get_db
-from app.security import plate_hmac
+from app.security import plate_hmac_candidates
 
 
 router = APIRouter(
@@ -15,6 +16,7 @@ router = APIRouter(
 @router.get("/{plate_number}")
 def get_vehicle(
     plate_number: str,
+    _: None = Depends(require_s2_api_key),
     db: Session = Depends(get_db),
 ):
     """
@@ -23,13 +25,13 @@ def get_vehicle(
     Normalized relationships:
 
         vehicles
-            ├── vehicle_type_fk -> vehicle_types
-            ├── color_fk        -> vehicle_colors
-            │
-            └── vehicle.id
-                    ├── parking_events.vehicle_fk
-                    ├── parking_sessions.vehicle_fk
-                    └── parking_slot_state.vehicle_fk
+            â”œâ”€â”€ vehicle_type_fk -> vehicle_types
+            â”œâ”€â”€ color_fk        -> vehicle_colors
+            â”‚
+            â””â”€â”€ vehicle.id
+                    â”œâ”€â”€ parking_events.vehicle_fk
+                    â”œâ”€â”€ parking_sessions.vehicle_fk
+                    â””â”€â”€ parking_slot_state.vehicle_fk
 
     Legacy vehicle_type/color columns are NOT used.
     Legacy parking_area_id on cameras is NOT used.
@@ -56,16 +58,11 @@ def get_vehicle(
             LEFT JOIN vehicle_colors vc
                 ON vc.id = v.color_fk
 
-           WHERE v.plate_number_hmac = :plate_hmac
-   OR (
-       v.plate_number_hmac IS NULL
-       AND v.plate_number = :plate
-   )
+           WHERE v.plate_number_hmac = ANY(CAST(:plate_hmacs AS TEXT[]))
             LIMIT 1
         """),
         {
-            "plate_hmac": plate_hmac(plate_number),
-            "plate": plate_number,
+            "plate_hmacs": plate_hmac_candidates(plate_number),
         },
     ).mappings().first()
 
@@ -82,11 +79,11 @@ def get_vehicle(
     # Area is resolved through:
     #
     # parking_slot_state
-    #       ↓
+    #       â†“
     # cameras
-    #       ↓
+    #       â†“
     # parking_area_fk
-    #       ↓
+    #       â†“
     # parking_areas
     #
     # We intentionally do NOT use:
